@@ -4,19 +4,21 @@
 // to etcd. It sends an AdmissionReview as JSON; we send one back saying whether
 // the write may proceed. That is the entire contract — there is no SDK here and
 // no dependencies in go.mod, because none are needed.
+//
+// The policy itself lives in a ConfigMap, not in this file. See rules.go.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"sync/atomic"
+	"time"
 )
-
-// requiredLabel is the whole policy: every Pod must carry this label.
-const requiredLabel = "team"
 
 // --- the wire format ---------------------------------------------------------
 // These structs are the AdmissionReview API, written by hand. The real ones live
@@ -46,8 +48,8 @@ type Status struct {
 	Message string `json:"message"`
 }
 
-// partialPod is the slice of a Pod this policy actually reads. Decoding only
-// what you need keeps the webhook working across API versions that add fields.
+// partialPod is the slice of a Pod this webhook reads. Decoding only what you
+// need keeps it working across API versions that add fields.
 type partialPod struct {
 	Metadata struct {
 		Name         string            `json:"name"`
@@ -56,9 +58,15 @@ type partialPod struct {
 	} `json:"metadata"`
 }
 
-// --- the decision ------------------------------------------------------------
+// --- the server --------------------------------------------------------------
 
-func validate(w http.ResponseWriter, r *http.Request) {
+// server holds the current policy. The pointer is swapped by watchRules while
+// requests are in flight, so reads are atomic and never block on a reload.
+type server struct {
+	rules atomic.Pointer[RuleSet]
+}
+
+func (s *server) validate(w http.ResponseWriter, r *http.Request) {
 	var review AdmissionReview
 	if err := json.NewDecoder(r.Body).Decode(&review); err != nil {
 		http.Error(w, "could not decode AdmissionReview: "+err.Error(), http.StatusBadRequest)
@@ -83,15 +91,15 @@ func validate(w http.ResponseWriter, r *http.Request) {
 		name = pod.Metadata.GenerateName + "(generated)"
 	}
 
-	if team, ok := pod.Metadata.Labels[requiredLabel]; ok {
-		log.Printf("ALLOW  %s  ns=%s  op=%s  %s=%s", name, req.Namespace, req.Operation, requiredLabel, team)
-		respond(w, req.UID, true, "")
+	// The only policy decision in this file is "ask the rules".
+	if violation := s.rules.Load().Evaluate(pod.Metadata.Labels); violation != "" {
+		log.Printf("DENY   %s  ns=%s  op=%s  %s", name, req.Namespace, req.Operation, violation)
+		respond(w, req.UID, false, fmt.Sprintf("Pod %q rejected: %s", name, violation))
 		return
 	}
 
-	log.Printf("DENY   %s  ns=%s  op=%s  missing %q", name, req.Namespace, req.Operation, requiredLabel)
-	respond(w, req.UID, false, fmt.Sprintf(
-		"Pod %q has no %q label. Add it under metadata.labels and apply again.", name, requiredLabel))
+	log.Printf("ALLOW  %s  ns=%s  op=%s", name, req.Namespace, req.Operation)
+	respond(w, req.UID, true, "")
 }
 
 // respond writes the AdmissionReview the API server is waiting for. The uid must
@@ -116,13 +124,26 @@ func respond(w http.ResponseWriter, uid string, allowed bool, message string) {
 	}
 }
 
-// --- the server --------------------------------------------------------------
+// --- startup -----------------------------------------------------------------
 
 func main() {
 	addr := env("ADDR", ":8443")
 	service := env("SERVICE_NAME", "admission-lab")
 	namespace := env("NAMESPACE", "admission-lab")
 	configName := env("WEBHOOK_CONFIG", "admission-lab")
+	rulesPath := env("RULES_FILE", "/etc/admission-lab/rules.json")
+
+	// Refuse to start without a policy. Running with none would silently allow
+	// everything, which looks identical to working.
+	initial, err := loadRules(rulesPath)
+	if err != nil {
+		log.Fatalf("could not load rules: %v", err)
+	}
+	srv := &server{}
+	srv.rules.Store(initial)
+	log.Printf("loaded %s from %s", initial.describe(), rulesPath)
+
+	go watchRules(context.Background(), rulesPath, 10*time.Second, &srv.rules)
 
 	// The two names the API server may dial this Service by.
 	dnsNames := []string{
@@ -130,27 +151,27 @@ func main() {
 		fmt.Sprintf("%s.%s.svc.cluster.local", service, namespace),
 	}
 
-	// 1. Mint our own certificate, in memory. No files, no openssl.
+	// Mint our own certificate, in memory. No files, no openssl.
 	cert, caPEM, err := selfSignedCert(dnsNames)
 	if err != nil {
 		log.Fatalf("could not create a certificate: %v", err)
 	}
 	log.Printf("generated a certificate for %v", dnsNames)
 
-	// 2. Tell the API server to trust it, by writing it into our own webhook
-	//    config. Until this succeeds, every call to us would fail TLS.
+	// Tell the API server to trust it, by writing it into our own webhook
+	// config. Until this succeeds, every call to us would fail TLS.
 	if err := publishCABundle(configName, caPEM); err != nil {
 		log.Fatalf("could not publish our CA to validatingwebhookconfiguration/%s: %v", configName, err)
 	}
 	log.Printf("published our CA into validatingwebhookconfiguration/%s", configName)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /validate", validate)
+	mux.HandleFunc("POST /validate", srv.validate)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprintln(w, "ok")
 	})
 
-	server := &http.Server{
+	httpServer := &http.Server{
 		Addr:    addr,
 		Handler: mux,
 		TLSConfig: &tls.Config{
@@ -160,10 +181,9 @@ func main() {
 	}
 
 	log.Printf("listening on %s", addr)
-	log.Printf("policy: every Pod must have a %q label", requiredLabel)
 
 	// Empty strings: the certificate is already in TLSConfig, not on disk.
-	if err := server.ListenAndServeTLS("", ""); err != nil {
+	if err := httpServer.ListenAndServeTLS("", ""); err != nil {
 		log.Fatalf("server stopped: %v", err)
 	}
 }

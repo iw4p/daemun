@@ -36,6 +36,21 @@ subjects:
     name: admission-lab
     namespace: admission-lab
 ---
+# The policy. Edit this and kubectl apply — the webhook picks it up within about
+# a minute, with no rebuild and no restart.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: admission-lab-rules
+  namespace: admission-lab
+data:
+  rules.json: |
+    {
+      "rules": [
+        { "requireLabel": "team" }
+      ]
+    }
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -64,6 +79,16 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+          volumeMounts:
+            - name: rules
+              mountPath: /etc/admission-lab
+              readOnly: true
+      volumes:
+        # Mounted as a volume, not env vars: the kubelet keeps a mounted
+        # ConfigMap in sync, so editing it changes policy in a running pod.
+        - name: rules
+          configMap:
+            name: admission-lab-rules
 ---
 apiVersion: v1
 kind: Service

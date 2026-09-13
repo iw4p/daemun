@@ -2,107 +2,108 @@
 
 대문 — *the main gate.*
 
-A Kubernetes validating admission webhook in ~330 lines of Go, with **zero
-dependencies**. It bootstraps its own TLS, so installing it is one
-`kubectl apply` — no openssl, no Secret, no cert-manager.
-
-The policy lives in a ConfigMap, not in the binary. Edit it, apply, and a
-running pod changes behaviour with no rebuild and no restart.
-
-```yaml
-rules:
-  - requireLabel: team
-  - requireLabel: cost-center
-    message: finance needs a cost-center label
-```
-
-## Install
+A Kubernetes validating admission webhook. Zero dependencies. It mints its own
+TLS certificate at startup and publishes the CA into its own webhook config, so
+installing it is one `kubectl apply` — no openssl, no Secret, no cert-manager.
 
 ```bash
 minikube image build -t daemun:dev .
 kubectl apply -f install.yaml
 ```
 
-See [RUNBOOK.md](RUNBOOK.md) for what each step does and how to verify it.
+## Policy
 
-## How it works
+Lives in a ConfigMap. Edit it, apply, and a running pod picks it up within
+about a minute — no rebuild, no restart.
 
+```json
+{
+  "rules": [
+    {
+      "name": "ownership",
+      "match":   { "kinds": ["Deployment"], "namespaces": ["shop"] },
+      "require": { "labels": ["team", "owner"], "annotations": ["change-ticket"] }
+    },
+    {
+      "name":   "pinned-images",
+      "action": "warn",
+      "forbid": { "latestImageTag": true, "labelValues": { "env": ["prod"] } }
+    }
+  ]
+}
 ```
-kubectl apply -f pod.yaml
-        │
-        ▼
-  ┌─────────────┐   "may this Pod be created?"   ┌──────────────┐
-  │ API server  │ ───────── HTTPS ─────────────> │ daemun pod   │
-  │             │ <──────── yes / no ──────────  │              │
-  └─────────────┘                                └──────────────┘
-        │
-        ▼
-      etcd
-```
 
-At startup the pod mints a self-signed certificate in memory for its own
-Service DNS name, then PATCHes that certificate into its own
-`ValidatingWebhookConfiguration` as the `caBundle`. The API server now trusts
-it, because it was told to by the pod — using a ClusterRole scoped to exactly
-that one object.
+`match` narrows a rule; omitted fields mean *anything*. `action` is `deny` by
+default — `warn` lets the write through and attaches the message to the kubectl
+output instead. Every violation is reported at once, not one per apply.
 
-This is what Kyverno's `controllers/certmanager` does, minus rotation.
+A controller is judged on its **pod template**, so a bad Deployment is rejected
+in the terminal that applied it rather than in a ReplicaSet event nobody reads.
+
+Unknown fields are a load error. A misspelled rule fails loudly instead of
+silently enforcing nothing.
 
 ## Layout
 
-| file | |
+| | |
 |---|---|
-| `main.go` | the AdmissionReview wire format, the HTTP handler, startup |
-| `rules.go` | the policy: `RuleSet.Evaluate` plus a ConfigMap watcher |
-| `certs.go` | generates a self-signed certificate in memory |
-| `publish.go` | writes the CA into our own webhook config via the API |
-| `install.yaml` | everything the cluster needs, in one file |
-| `policy.yaml` | the same rule as a native `ValidatingAdmissionPolicy` — no server at all |
-
-`RuleSet.Evaluate` knows nothing about HTTP, TLS or Kubernetes, which is what
-makes it directly testable:
+| `policy.go` | rules, matching, evaluation, config validation |
+| `object.go` | the fields daemun reads, from any kind |
+| `source.go` | loads and reloads the ConfigMap |
+| `admission.go` | the AdmissionReview wire contract |
+| `server.go` | the HTTP handler |
+| `certs.go` `publish.go` | self-signed cert, published as the caBundle |
+| `main.go` | wiring |
+| `install.yaml` | everything the cluster needs |
+| `policy.yaml` | the same idea as a native ValidatingAdmissionPolicy — no server at all |
 
 ```bash
 go test ./...
 ```
 
-## Do you even need this?
+## How it works
 
-Probably not, for a rule this simple. `policy.yaml` expresses the same policy as
-a native `ValidatingAdmissionPolicy` — the API server evaluates CEL itself, so
-there is no image, no Service, no certificate and nothing to keep alive.
+At startup the pod generates a certificate for its own Service DNS name and
+PATCHes it into `validatingwebhookconfiguration/daemun` as the `caBundle`, using
+a ClusterRole scoped to that one object. The API server then trusts it.
 
-A webhook earns its place when CEL cannot reach far enough: calling another
-service, looking up a different object, verifying an image signature, or
-generating a second resource. That is the line this repo exists to sit on.
+This is what Kyverno's `controllers/certmanager` does, minus rotation.
+
+## What it cannot do
+
+- **Mutate.** Deny or warn only. No defaulting a missing label, no sidecar
+  injection.
+- **Look at anything but the object in front of it.** No cross-object rules
+  ("no two Ingresses may claim one host"), because that needs a cache and a
+  cache can be stale.
+- **Read the spec beyond images.** No resource limits, security context,
+  host mounts, or probes.
+- **Match on values.** Labels are present-or-absent; there is no regex or set
+  membership beyond `forbid.labelValues`.
+- **CronJobs.** Their pod template nests one level deeper than the others.
+- **Rotate its certificate.** Good for a year, then the webhook silently stops
+  being called.
+- **Survive a node drain.** One replica, no PodDisruptionBudget.
+- **Report anything.** Logs only — no metrics, no PolicyReport, no audit trail.
+
+## Do you even need it?
+
+For rules this simple, no. `policy.yaml` expresses the same thing as a native
+`ValidatingAdmissionPolicy`: the API server evaluates CEL itself, so there is no
+image, no Service, no certificate and nothing to keep alive.
+
+A webhook earns its place when CEL cannot reach far enough — calling another
+service, verifying an image signature, generating a second resource. That is the
+line this repo sits on.
 
 ## Status
 
-`go vet` clean, tests pass, builds. Verified locally end to end over TLS against
-a hand-written AdmissionReview.
-
-**Not yet run in a cluster** — written while the Docker daemon was down. Expect
-to fix something on the first `kubectl apply`.
+`go vet` clean, tests pass, builds. **Not yet run in a cluster.**
 
 ## Next
 
-- Move the rules from a ConfigMap into a CRD (`kind: LabelPolicy`) watched with
-  an informer. Schema validation, `kubectl get labelpolicies`, per-policy RBAC.
-  Costs `client-go` as a real dependency. This is the Kyverno shape.
-- Return a JSONPatch instead of a boolean → a mutating webhook, which is how
-  Istio injects sidecars.
-- Rotate the certificate. It is currently good for a year, after which the
-  webhook silently stops being called.
-- Mutual TLS so the webhook authenticates the API server back. Kyverno issue
-  #16559 is open on exactly this.
-
-## Two things worth breaking on purpose
-
-**Set `failurePolicy: Fail` and scale the deployment to zero.** Nothing can be
-created anywhere in the cluster. That is the classic production outage, and
-`kubectl delete validatingwebhookconfiguration daemun` recovers it.
-
-**Change `resources: ["pods"]` to `["*"]`.** Every write in the cluster now
-flows through this pod. Avoiding that is what Kyverno's 1,782-line
-`controllers/webhook` is for — it rewrites its own registration so the API
-server only calls it for resources a policy actually mentions.
+- Move the policy from a ConfigMap into a CRD watched with an informer: schema
+  validation, `kubectl get`, per-policy RBAC. Costs `client-go`. This is the
+  Kyverno shape.
+- Mutating support — return a JSONPatch instead of a verdict.
+- Certificate rotation.

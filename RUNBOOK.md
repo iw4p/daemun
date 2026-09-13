@@ -23,7 +23,7 @@ You should see:
 generated a certificate for [daemun.daemun.svc daemun.daemun.svc.cluster.local]
 published our CA into validatingwebhookconfiguration/daemun
 listening on :8443
-policy: every Pod must have a "team" label
+policy loaded — 2 rule(s): ownership, pinned-images
 ```
 
 Try it, in another terminal:

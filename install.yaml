@@ -41,13 +41,21 @@ subjects:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: daemun-rules
+  name: daemun-policy
   namespace: daemun
 data:
-  rules.json: |
+  policy.json: |
     {
       "rules": [
-        { "requireLabel": "team" }
+        {
+          "name": "ownership",
+          "require": { "labels": ["team"] }
+        },
+        {
+          "name": "pinned-images",
+          "action": "warn",
+          "forbid": { "latestImageTag": true }
+        }
       ]
     }
 ---
@@ -80,15 +88,15 @@ spec:
                 fieldRef:
                   fieldPath: metadata.namespace
           volumeMounts:
-            - name: rules
+            - name: policy
               mountPath: /etc/daemun
               readOnly: true
       volumes:
         # Mounted as a volume, not env vars: the kubelet keeps a mounted
         # ConfigMap in sync, so editing it changes policy in a running pod.
-        - name: rules
+        - name: policy
           configMap:
-            name: daemun-rules
+            name: daemun-policy
 ---
 apiVersion: v1
 kind: Service
@@ -125,10 +133,22 @@ webhooks:
       # Deliberately absent. The pod fills this in when it starts.
 
     rules:
-      - operations: ["CREATE"]
+      # Controllers as well as bare Pods, so a bad Deployment is rejected in the
+      # terminal that applied it rather than in a ReplicaSet event.
+      - operations: ["CREATE", "UPDATE"]
         apiGroups: [""]
         apiVersions: ["v1"]
         resources: ["pods"]
+        scope: Namespaced
+      - operations: ["CREATE", "UPDATE"]
+        apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+        scope: Namespaced
+      - operations: ["CREATE", "UPDATE"]
+        apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        resources: ["jobs"]
         scope: Namespaced
 
     namespaceSelector:

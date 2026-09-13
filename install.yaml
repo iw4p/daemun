@@ -1,0 +1,119 @@
+# Everything, in one file. Apply it and the webhook works — the pod mints its own
+# certificate at startup and writes it into the webhook config below.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: admission-lab
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: admission-lab
+  namespace: admission-lab
+---
+# The pod needs permission to edit its own webhook config. That is the only
+# cluster-level power it has.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: admission-lab
+rules:
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingwebhookconfigurations"]
+    resourceNames: ["admission-lab"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: admission-lab
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: admission-lab
+subjects:
+  - kind: ServiceAccount
+    name: admission-lab
+    namespace: admission-lab
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: admission-lab
+  namespace: admission-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: admission-lab
+  template:
+    metadata:
+      labels:
+        app: admission-lab
+    spec:
+      serviceAccountName: admission-lab
+      containers:
+        - name: webhook
+          image: admission-lab:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: https
+              containerPort: 8443
+          env:
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: admission-lab
+  namespace: admission-lab
+spec:
+  selector:
+    app: admission-lab
+  ports:
+    - port: 443
+      targetPort: 8443
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: admission-lab
+webhooks:
+  - name: pods.admission-lab.local
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+
+    # If the webhook is unreachable, let the write through. Keep this while
+    # learning — Fail means no Pod can be created anywhere if this pod is down.
+    failurePolicy: Ignore
+    timeoutSeconds: 5
+
+    clientConfig:
+      service:
+        name: admission-lab
+        namespace: admission-lab
+        path: /validate
+        port: 443
+      # Deliberately absent. The pod fills this in when it starts.
+
+    rules:
+      - operations: ["CREATE"]
+        apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["pods"]
+        scope: Namespaced
+
+    namespaceSelector:
+      matchExpressions:
+        # Never gate the control plane, and never gate ourselves — otherwise
+        # this pod would need its own approval to start.
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - kube-system
+            - kube-public
+            - kube-node-lease
+            - admission-lab

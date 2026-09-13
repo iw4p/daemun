@@ -1,0 +1,9 @@
+# No team label. The webhook should reject this.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: no-label
+spec:
+  containers:
+    - name: app
+      image: registry.k8s.io/pause:3.10

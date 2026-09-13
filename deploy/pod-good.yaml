@@ -1,0 +1,11 @@
+# Has the team label. The webhook should allow this.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: has-label
+  labels:
+    team: platform
+spec:
+  containers:
+    - name: app
+      image: registry.k8s.io/pause:3.10

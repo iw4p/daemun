@@ -1,0 +1,46 @@
+# The same policy, with no webhook at all.
+#
+# No image, no Deployment, no Service, no certificate, no RBAC. The API server
+# evaluates the rule itself, so there is nothing to run and nothing to trust.
+#
+#   kubectl apply -f policy.yaml
+#
+# On Kubernetes 1.28-1.29 change both apiVersions to
+# admissionregistration.k8s.io/v1beta1.
+
+# 1. The rule.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: require-team-label
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+  validations:
+    # CEL. `object` is the Pod being created.
+    - expression: "has(object.metadata.labels) && 'team' in object.metadata.labels"
+      message: "every Pod must have a 'team' label"
+---
+# 2. Where the rule applies. Separate object so one policy can be rolled out to
+#    different namespaces independently.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: require-team-label
+spec:
+  policyName: require-team-label
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - kube-system
+            - kube-public
+            - kube-node-lease

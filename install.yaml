@@ -3,46 +3,46 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: admission-lab
+  name: daemun
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: admission-lab
-  namespace: admission-lab
+  name: daemun
+  namespace: daemun
 ---
 # The pod needs permission to edit its own webhook config. That is the only
 # cluster-level power it has.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: admission-lab
+  name: daemun
 rules:
   - apiGroups: ["admissionregistration.k8s.io"]
     resources: ["validatingwebhookconfigurations"]
-    resourceNames: ["admission-lab"]
+    resourceNames: ["daemun"]
     verbs: ["get", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: admission-lab
+  name: daemun
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: admission-lab
+  name: daemun
 subjects:
   - kind: ServiceAccount
-    name: admission-lab
-    namespace: admission-lab
+    name: daemun
+    namespace: daemun
 ---
 # The policy. Edit this and kubectl apply — the webhook picks it up within about
 # a minute, with no rebuild and no restart.
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: admission-lab-rules
-  namespace: admission-lab
+  name: daemun-rules
+  namespace: daemun
 data:
   rules.json: |
     {
@@ -54,22 +54,22 @@ data:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: admission-lab
-  namespace: admission-lab
+  name: daemun
+  namespace: daemun
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: admission-lab
+      app: daemun
   template:
     metadata:
       labels:
-        app: admission-lab
+        app: daemun
     spec:
-      serviceAccountName: admission-lab
+      serviceAccountName: daemun
       containers:
         - name: webhook
-          image: admission-lab:dev
+          image: daemun:dev
           imagePullPolicy: IfNotPresent
           ports:
             - name: https
@@ -81,23 +81,23 @@ spec:
                   fieldPath: metadata.namespace
           volumeMounts:
             - name: rules
-              mountPath: /etc/admission-lab
+              mountPath: /etc/daemun
               readOnly: true
       volumes:
         # Mounted as a volume, not env vars: the kubelet keeps a mounted
         # ConfigMap in sync, so editing it changes policy in a running pod.
         - name: rules
           configMap:
-            name: admission-lab-rules
+            name: daemun-rules
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: admission-lab
-  namespace: admission-lab
+  name: daemun
+  namespace: daemun
 spec:
   selector:
-    app: admission-lab
+    app: daemun
   ports:
     - port: 443
       targetPort: 8443
@@ -105,9 +105,9 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
 metadata:
-  name: admission-lab
+  name: daemun
 webhooks:
-  - name: pods.admission-lab.local
+  - name: pods.daemun.local
     admissionReviewVersions: ["v1"]
     sideEffects: None
 
@@ -118,8 +118,8 @@ webhooks:
 
     clientConfig:
       service:
-        name: admission-lab
-        namespace: admission-lab
+        name: daemun
+        namespace: daemun
         path: /validate
         port: 443
       # Deliberately absent. The pod fills this in when it starts.
@@ -141,4 +141,4 @@ webhooks:
             - kube-system
             - kube-public
             - kube-node-lease
-            - admission-lab
+            - daemun

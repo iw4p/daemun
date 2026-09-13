@@ -5,7 +5,7 @@ Two commands.
 ```bash
 minikube start
 
-minikube image build -t admission-lab:dev .
+minikube image build -t daemun:dev .
 kubectl apply -f install.yaml
 ```
 
@@ -14,14 +14,14 @@ That's the install. No openssl, no secrets, no base64 — same as installing Kyv
 Watch it come up:
 
 ```bash
-kubectl -n admission-lab logs -l app=admission-lab -f
+kubectl -n daemun logs -l app=daemun -f
 ```
 
 You should see:
 
 ```
-generated a certificate for [admission-lab.admission-lab.svc admission-lab.admission-lab.svc.cluster.local]
-published our CA into validatingwebhookconfiguration/admission-lab
+generated a certificate for [daemun.daemun.svc daemun.daemun.svc.cluster.local]
+published our CA into validatingwebhookconfiguration/daemun
 listening on :8443
 policy: every Pod must have a "team" label
 ```
@@ -49,7 +49,7 @@ to do it, so the pod does it to itself at startup:
 | step | code | what happens |
 |---|---|---|
 | 1 | `certs.go` | pod generates a certificate in memory for its own Service name |
-| 2 | `publish.go` | pod PATCHes that certificate into `validatingwebhookconfiguration/admission-lab` as `caBundle` |
+| 2 | `publish.go` | pod PATCHes that certificate into `validatingwebhookconfiguration/daemun` as `caBundle` |
 | 3 | `main.go` | pod serves HTTPS with it |
 
 Now the API server trusts the pod, because the pod told it to — and it was
@@ -57,7 +57,7 @@ allowed to, because of the ClusterRole in `install.yaml`:
 
 ```yaml
 resources: ["validatingwebhookconfigurations"]
-resourceNames: ["admission-lab"]
+resourceNames: ["daemun"]
 verbs: ["get", "patch"]
 ```
 
@@ -66,7 +66,7 @@ It can edit that one object and nothing else.
 Look at what it wrote:
 
 ```bash
-kubectl get validatingwebhookconfiguration admission-lab \
+kubectl get validatingwebhookconfiguration daemun \
   -o jsonpath='{.webhooks[0].clientConfig.caBundle}' | head -c 60
 ```
 
@@ -98,7 +98,7 @@ The last one is what "registering" means — it's just a YAML object.
 ## If something breaks
 
 **`ImagePullBackOff`** — the image was built outside minikube. Rerun
-`minikube image build -t admission-lab:dev .`
+`minikube image build -t daemun:dev .`
 
 **Pod crash-looping with "could not publish our CA"** — RBAC didn't apply, or
 the `ValidatingWebhookConfiguration` isn't there yet. Reapply `install.yaml`.
@@ -108,12 +108,12 @@ the pod and gave up quietly, because `failurePolicy: Ignore`. Check the pod is
 `Running` and the Service has an endpoint:
 
 ```bash
-kubectl -n admission-lab get pods,endpoints
+kubectl -n daemun get pods,endpoints
 ```
 
 **Nothing can be created anywhere** — you set `failurePolicy: Fail` and the pod
 is down:
 
 ```bash
-kubectl delete validatingwebhookconfiguration admission-lab
+kubectl delete validatingwebhookconfiguration daemun
 ```

@@ -1,124 +1,108 @@
-# admission-lab
+# daemun
 
-A validating admission webhook in ~130 lines of Go, with **zero dependencies**.
+대문 — *the main gate.*
 
-The policy: *every Pod must carry a `team` label.* That is deliberately trivial —
-the point is not the rule, it is everything around it.
+A Kubernetes validating admission webhook in ~330 lines of Go, with **zero
+dependencies**. It bootstraps its own TLS, so installing it is one
+`kubectl apply` — no openssl, no Secret, no cert-manager.
 
-Two ways to run it:
-
-- **dev loop** — the webhook runs on your Mac, the API server dials back out.
-  Edit, `ctrl-C`, rerun. No image builds.
-- **in-cluster** — the webhook runs as a Deployment behind a Service, the way a
-  real one does.
-
----
-
-## Dev loop
-
-```bash
-make cluster     # kind cluster (once)
-make certs       # CA + server cert for host.docker.internal
-make run         # terminal 1 — leave running
-make register    # terminal 2
-make check       # one bad Pod, one good Pod
-```
-
----
-
-## In-cluster (minikube)
-
-The webhook stops being a process on your laptop and becomes a workload the
-cluster is responsible for. Four things change, and all four are the reason
-this step is worth doing.
-
-```bash
-minikube start                 # needs the Docker daemon running
-make certs-incluster           # cert for admission-lab.admission-lab.svc
-make image                     # builds into minikube's own daemon — no registry
-make deploy                    # namespace, TLS secret, Deployment, Service, PDB
-make register-incluster        # register against the Service
-make status
-make check
-make logs                      # follow both replicas
-```
-
-### What actually changed
-
-**1. `clientConfig.url` → `clientConfig.service`.** The API server no longer
-dials a hostname on your network; it resolves `admission-lab.admission-lab.svc`
-through cluster DNS and load-balances across the replicas.
-
-**2. The certificate covers a different name.** `make certs-incluster` puts the
-Service DNS name in the SAN instead of `host.docker.internal`. Same CA
-mechanics, different name — and getting it wrong fails silently while
-`failurePolicy: Ignore` is set.
-
-**3. The cert arrives as a Secret.** `kubectl create secret tls` → mounted
-read-only at `/etc/webhook/certs`, and `TLS_CERT`/`TLS_KEY` point at it. In a
-real deployment something has to *rotate* that Secret before it expires. That
-is the whole job of Kyverno's `controllers/certmanager`.
-
-**4. Availability is now your problem.** Two replicas, pod anti-affinity, a
-PodDisruptionBudget, and a readiness probe. With one replica, draining a node
-takes the webhook down — and with `failurePolicy: Fail` that takes the cluster
-with it.
-
-### The self-deadlock guard
-
-`deploy/in-cluster/webhook.yaml.tpl` excludes its own namespace by label:
+The policy lives in a ConfigMap, not in the binary. Edit it, apply, and a
+running pod changes behaviour with no rebuild and no restart.
 
 ```yaml
-- key: admission-lab/self
-  operator: DoesNotExist
+rules:
+  - requireLabel: team
+  - requireLabel: cost-center
+    message: finance needs a cost-center label
 ```
 
-Without it, the webhook has to admit its own Pods. Lose both replicas and
-nothing can ever schedule them again, because the thing that would approve them
-is the thing that is down. Every production webhook has some version of this
-exclusion.
+## Install
 
----
+```bash
+minikube image build -t daemun:dev .
+kubectl apply -f install.yaml
+```
 
-## The two experiments
+See [RUNBOOK.md](RUNBOOK.md) for what each step does and how to verify it.
 
-**1. Watch `failurePolicy` cause an outage.** Set `failurePolicy: Fail`,
-re-register, then `kubectl -n admission-lab scale deploy/admission-lab --replicas=0`.
-Now try to create any Pod anywhere. Recover with `make unregister`.
+## How it works
 
-**2. Widen the blast radius.** Change `resources: ["pods"]` to `["*"]` and add
-`UPDATE`. Re-register and watch `make logs` while the cluster does ordinary
-work — every write now flows through your webhook. Avoiding exactly this is
-what Kyverno's 1,782-line `controllers/webhook` does: it rewrites its own
-registration so the API server only calls it for resources a policy mentions.
+```
+kubectl apply -f pod.yaml
+        │
+        ▼
+  ┌─────────────┐   "may this Pod be created?"   ┌──────────────┐
+  │ API server  │ ───────── HTTPS ─────────────> │ daemun pod   │
+  │             │ <──────── yes / no ──────────  │              │
+  └─────────────┘                                └──────────────┘
+        │
+        ▼
+      etcd
+```
 
----
+At startup the pod mints a self-signed certificate in memory for its own
+Service DNS name, then PATCHes that certificate into its own
+`ValidatingWebhookConfiguration` as the `caBundle`. The API server now trusts
+it, because it was told to by the pod — using a ClusterRole scoped to exactly
+that one object.
+
+This is what Kyverno's `controllers/certmanager` does, minus rotation.
+
+## Layout
+
+| file | |
+|---|---|
+| `main.go` | the AdmissionReview wire format, the HTTP handler, startup |
+| `rules.go` | the policy: `RuleSet.Evaluate` plus a ConfigMap watcher |
+| `certs.go` | generates a self-signed certificate in memory |
+| `publish.go` | writes the CA into our own webhook config via the API |
+| `install.yaml` | everything the cluster needs, in one file |
+| `policy.yaml` | the same rule as a native `ValidatingAdmissionPolicy` — no server at all |
+
+`RuleSet.Evaluate` knows nothing about HTTP, TLS or Kubernetes, which is what
+makes it directly testable:
+
+```bash
+go test ./...
+```
+
+## Do you even need this?
+
+Probably not, for a rule this simple. `policy.yaml` expresses the same policy as
+a native `ValidatingAdmissionPolicy` — the API server evaluates CEL itself, so
+there is no image, no Service, no certificate and nothing to keep alive.
+
+A webhook earns its place when CEL cannot reach far enough: calling another
+service, looking up a different object, verifying an image signature, or
+generating a second resource. That is the line this repo exists to sit on.
 
 ## Status
 
-Verified locally: `go vet` clean, builds, certs chain and carry the right SANs,
-and the handler returns correct `allowed: true/false` for both fixtures.
+`go vet` clean, tests pass, builds. Verified locally end to end over TLS against
+a hand-written AdmissionReview.
 
-The in-cluster manifests are written but **not yet applied** — `kubectl` needs a
-running API server even to validate them, and the Docker daemon was down when
-they were authored. First `make deploy` is the real test.
+**Not yet run in a cluster** — written while the Docker daemon was down. Expect
+to fix something on the first `kubectl apply`.
 
----
+## Next
 
-## Where to go next
-
-- Return a JSONPatch instead of a boolean → a *mutating* webhook. That is how
+- Move the rules from a ConfigMap into a CRD (`kind: LabelPolicy`) watched with
+  an informer. Schema validation, `kubectl get labelpolicies`, per-policy RBAC.
+  Costs `client-go` as a real dependency. This is the Kyverno shape.
+- Return a JSONPatch instead of a boolean → a mutating webhook, which is how
   Istio injects sidecars.
-- Enforce something needing a second object ("no two Pods claim the same
-  `team`+`role`"). You will need a lookup, the lookup needs a cache, the cache
-  can be stale. That race is inherent to admission control — no policy engine
-  solves it.
-- Add mutual TLS so the webhook authenticates the API server back. Kyverno
-  issue #16559 is still open on exactly this.
+- Rotate the certificate. It is currently good for a year, after which the
+  webhook silently stops being called.
+- Mutual TLS so the webhook authenticates the API server back. Kyverno issue
+  #16559 is open on exactly this.
 
-## Cleanup
+## Two things worth breaking on purpose
 
-```bash
-make undeploy     # in-cluster
-make unregister   # dev
-```
+**Set `failurePolicy: Fail` and scale the deployment to zero.** Nothing can be
+created anywhere in the cluster. That is the classic production outage, and
+`kubectl delete validatingwebhookconfiguration daemun` recovers it.
+
+**Change `resources: ["pods"]` to `["*"]`.** Every write in the cluster now
+flows through this pod. Avoiding that is what Kyverno's 1,782-line
+`controllers/webhook` is for — it rewrites its own registration so the API
+server only calls it for resources a policy actually mentions.

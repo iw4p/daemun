@@ -128,10 +128,10 @@ func respond(w http.ResponseWriter, uid string, allowed bool, message string) {
 
 func main() {
 	addr := env("ADDR", ":8443")
-	service := env("SERVICE_NAME", "admission-lab")
-	namespace := env("NAMESPACE", "admission-lab")
-	configName := env("WEBHOOK_CONFIG", "admission-lab")
-	rulesPath := env("RULES_FILE", "/etc/admission-lab/rules.json")
+	service := env("SERVICE_NAME", "daemun")
+	namespace := env("NAMESPACE", "daemun")
+	configName := env("WEBHOOK_CONFIG", "daemun")
+	rulesPath := env("RULES_FILE", "/etc/daemun/rules.json")
 
 	// Refuse to start without a policy. Running with none would silently allow
 	// everything, which looks identical to working.
